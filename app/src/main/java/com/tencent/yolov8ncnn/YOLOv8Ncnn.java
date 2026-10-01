@@ -14,6 +14,7 @@ public class YOLOv8Ncnn
     public native byte[] getFrameRGB();
     public native int getFrameWidth();
     public native int getFrameHeight();
+    public native void setDrawBoxes(boolean on);
 
     // 相机控制
     public native int setAFMode(int mode);

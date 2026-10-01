@@ -231,6 +231,8 @@ public class WebServer extends Thread
             ncnn.setAFMode(3);
             ncnn.setAEMode(1);
             ncnn.setAwbMode(1);
+        } else if (path.startsWith("/api/boxes")) {
+            ncnn.setDrawBoxes(parseInt(p.get("on"), 0) != 0);
         } else {
             result = "unknown";
         }

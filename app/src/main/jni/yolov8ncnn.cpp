@@ -52,6 +52,7 @@ static std::vector<uint8_t> g_result_frame;
 static std::vector<uint8_t> g_frame_rgb;
 static int g_frame_w = 0;
 static int g_frame_h = 0;
+static bool g_draw_boxes = false;  // 是否在视频流上叠加检测框
 
 // ===== 标定参数（TODO：按一加9Pro实际相机与安装位标定）=====
 static const float CAM_HEIGHT_M = 1.2f;  // 相机离地高度(米)
@@ -90,15 +91,21 @@ static void process_frame(const cv::Mat& rgb)
     std::vector<Object> objects;
     g_yolov8->detect(rgb, objects);
 
-    // 缓存 RGB 画面（供 WebUI 视频流）
+    // 缓存 RGB 画面（供 WebUI 视频流）；可选叠加检测框
+    cv::Mat display = rgb;
+    if (g_draw_boxes)
     {
-        size_t sz = rgb.total() * rgb.elemSize();
-        if (rgb.isContinuous() && sz > 0)
+        display = rgb.clone();
+        g_yolov8->draw(display, objects);
+    }
+    {
+        size_t sz = display.total() * display.elemSize();
+        if (display.isContinuous() && sz > 0)
         {
             g_frame_rgb.resize(sz);
-            memcpy(g_frame_rgb.data(), rgb.data, sz);
-            g_frame_w = rgb.cols;
-            g_frame_h = rgb.rows;
+            memcpy(g_frame_rgb.data(), display.data, sz);
+            g_frame_w = display.cols;
+            g_frame_h = display.rows;
         }
     }
 
@@ -430,6 +437,12 @@ JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setSensitivity(JNI
 JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setAwbMode(JNIEnv* env, jobject thiz, jint mode)
 {
     return g_camera->setAwbMode(mode);
+}
+
+// public native void setDrawBoxes(boolean on);
+JNIEXPORT void JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setDrawBoxes(JNIEnv* env, jobject thiz, jboolean on)
+{
+    g_draw_boxes = (on == JNI_TRUE);
 }
 
 // public native String listCameras(int facing);
