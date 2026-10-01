@@ -234,7 +234,10 @@ function loadCameras(){
     .catch(function(){});
 }
 
-document.getElementById('facing').onchange = loadCameras;
+document.getElementById('facing').onchange = function(){
+  loadCameras();
+  api('/api/camera?facing=' + this.value + '&index=0');
+};
 
 document.getElementById('cam').onchange = function(){
   api('/api/camera?facing=' + document.getElementById('facing').value + '&index=' + this.value);

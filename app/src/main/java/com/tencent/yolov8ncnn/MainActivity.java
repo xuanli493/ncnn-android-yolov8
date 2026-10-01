@@ -27,7 +27,7 @@ public class MainActivity extends Activity
     public static final int REQUEST_CAMERA = 100;
 
     private YOLOv8Ncnn yolov8ncnn = new YOLOv8Ncnn();
-    private int facing = 0;
+    private int facing = 1;
 
     private Spinner spinnerTask;
     private Spinner spinnerModel;
