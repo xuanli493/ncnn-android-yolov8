@@ -46,9 +46,22 @@
 
     </LinearLayout>
 
-    <SurfaceView
-        android:id="@+id/cameraview"
+    <TextView
+        android:id="@+id/urlview"
         android:layout_width="fill_parent"
-        android:layout_height="fill_parent" />
+        android:layout_height="wrap_content"
+        android:padding="4dp"
+        android:textSize="14sp"
+        android:text="WebUI 未启动" />
+
+    <TextView
+        android:id="@+id/resultview"
+        android:layout_width="fill_parent"
+        android:layout_height="fill_parent"
+        android:padding="8dp"
+        android:typeface="monospace"
+        android:textSize="14sp"
+        android:scrollbars="vertical"
+        android:text="等待结果..." />
 
 </LinearLayout>

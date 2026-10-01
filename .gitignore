@@ -1,0 +1,19 @@
+# Gradle build output
+.gradle/
+build/
+app/build/
+app/.cxx/
+
+# Native dependencies (downloaded separately — see README)
+app/src/main/jni/ncnn-*/
+app/src/main/jni/opencv-mobile-*/
+app/src/main/jniLibs/arm64-v8a/libvulkan_freedreno.so
+
+# Local configuration (machine-specific SDK path)
+local.properties
+
+# IDE
+.idea/
+*.iml
+.DS_Store
+captures/

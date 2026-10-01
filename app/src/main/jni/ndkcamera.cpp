@@ -15,6 +15,7 @@
 #include "ndkcamera.h"
 
 #include <string>
+#include <cstdio>
 
 #include <android/log.h>
 
@@ -211,68 +212,97 @@ NdkCamera::~NdkCamera()
     }
 }
 
+static std::vector<CameraInfo> enumerate_cameras(ACameraManager* mgr)
+{
+    std::vector<CameraInfo> result;
+    ACameraIdList* camera_id_list = 0;
+    ACameraManager_getCameraIdList(mgr, &camera_id_list);
+
+    for (int i = 0; i < camera_id_list->numCameras; ++i)
+    {
+        const char* id = camera_id_list->cameraIds[i];
+        ACameraMetadata* camera_metadata = 0;
+        ACameraManager_getCameraCharacteristics(mgr, id, &camera_metadata);
+
+        CameraInfo info;
+        info.id = id;
+        info.facing = 1; // 默认 back
+        info.orientation = 0;
+        info.focal_length = 0.f;
+
+        {
+            ACameraMetadata_const_entry e = { 0 };
+            ACameraMetadata_getConstEntry(camera_metadata, ACAMERA_LENS_FACING, &e);
+            if (e.count > 0)
+                info.facing = (e.data.u8[0] == ACAMERA_LENS_FACING_FRONT) ? 0 : 1;
+        }
+        {
+            ACameraMetadata_const_entry e = { 0 };
+            ACameraMetadata_getConstEntry(camera_metadata, ACAMERA_SENSOR_ORIENTATION, &e);
+            if (e.count > 0)
+                info.orientation = (int)e.data.i32[0];
+        }
+        {
+            ACameraMetadata_const_entry e = { 0 };
+            ACameraMetadata_getConstEntry(camera_metadata, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, &e);
+            if (e.count > 0)
+                info.focal_length = e.data.f[0];
+        }
+
+        ACameraMetadata_free(camera_metadata);
+        result.push_back(info);
+    }
+
+    ACameraManager_deleteCameraIdList(camera_id_list);
+    return result;
+}
+
 int NdkCamera::open(int _camera_facing)
 {
-    __android_log_print(ANDROID_LOG_WARN, "NdkCamera", "open");
+    return open(_camera_facing, 0);
+}
+
+int NdkCamera::open(int _camera_facing, int index)
+{
+    __android_log_print(ANDROID_LOG_WARN, "NdkCamera", "open facing=%d index=%d", _camera_facing, index);
 
     camera_facing = _camera_facing;
 
     camera_manager = ACameraManager_create();
 
-    // find front camera
+    std::vector<CameraInfo> cameras = enumerate_cameras(camera_manager);
+
+    // 找 facing 匹配的第 index 个
     std::string camera_id;
+    int count = 0;
+    for (size_t i = 0; i < cameras.size(); i++)
     {
-        ACameraIdList* camera_id_list = 0;
-        ACameraManager_getCameraIdList(camera_manager, &camera_id_list);
-
-        for (int i = 0; i < camera_id_list->numCameras; ++i)
+        if (cameras[i].facing == _camera_facing)
         {
-            const char* id = camera_id_list->cameraIds[i];
-            ACameraMetadata* camera_metadata = 0;
-            ACameraManager_getCameraCharacteristics(camera_manager, id, &camera_metadata);
-
-            // query faceing
-            acamera_metadata_enum_android_lens_facing_t facing = ACAMERA_LENS_FACING_FRONT;
+            if (count == index)
             {
-                ACameraMetadata_const_entry e = { 0 };
-                ACameraMetadata_getConstEntry(camera_metadata, ACAMERA_LENS_FACING, &e);
-                facing = (acamera_metadata_enum_android_lens_facing_t)e.data.u8[0];
+                camera_id = cameras[i].id;
+                camera_orientation = cameras[i].orientation;
+                break;
             }
-
-            if (camera_facing == 0 && facing != ACAMERA_LENS_FACING_FRONT)
-            {
-                ACameraMetadata_free(camera_metadata);
-                continue;
-            }
-
-            if (camera_facing == 1 && facing != ACAMERA_LENS_FACING_BACK)
-            {
-                ACameraMetadata_free(camera_metadata);
-                continue;
-            }
-
-            camera_id = id;
-
-            // query orientation
-            int orientation = 0;
-            {
-                ACameraMetadata_const_entry e = { 0 };
-                ACameraMetadata_getConstEntry(camera_metadata, ACAMERA_SENSOR_ORIENTATION, &e);
-
-                orientation = (int)e.data.i32[0];
-            }
-
-            camera_orientation = orientation;
-
-            ACameraMetadata_free(camera_metadata);
-
-            break;
+            count++;
         }
-
-        ACameraManager_deleteCameraIdList(camera_id_list);
     }
 
-    __android_log_print(ANDROID_LOG_WARN, "NdkCamera", "open %s %d", camera_id.c_str(), camera_orientation);
+    if (camera_id.empty() && !cameras.empty())
+    {
+        // 回退到第一个
+        camera_id = cameras[0].id;
+        camera_orientation = cameras[0].orientation;
+    }
+
+    if (camera_id.empty())
+    {
+        __android_log_print(ANDROID_LOG_WARN, "NdkCamera", "no camera found");
+        return -1;
+    }
+
+    __android_log_print(ANDROID_LOG_WARN, "NdkCamera", "open %s orient=%d", camera_id.c_str(), camera_orientation);
 
     // open camera
     {
@@ -308,19 +338,96 @@ int NdkCamera::open(int _camera_facing)
 
         ACameraDevice_createCaptureSession(camera_device, capture_session_output_container, &camera_capture_session_state_callbacks, &capture_session);
 
-        ACameraCaptureSession_captureCallbacks camera_capture_session_capture_callbacks;
-        camera_capture_session_capture_callbacks.context = this;
-        camera_capture_session_capture_callbacks.onCaptureStarted = 0;
-        camera_capture_session_capture_callbacks.onCaptureProgressed = 0;
-        camera_capture_session_capture_callbacks.onCaptureCompleted = onCaptureCompleted;
-        camera_capture_session_capture_callbacks.onCaptureFailed = onCaptureFailed;
-        camera_capture_session_capture_callbacks.onCaptureSequenceCompleted = onCaptureSequenceCompleted;
-        camera_capture_session_capture_callbacks.onCaptureSequenceAborted = onCaptureSequenceAborted;
-        camera_capture_session_capture_callbacks.onCaptureBufferLost = 0;
+        capture_callbacks.context = this;
+        capture_callbacks.onCaptureStarted = 0;
+        capture_callbacks.onCaptureProgressed = 0;
+        capture_callbacks.onCaptureCompleted = onCaptureCompleted;
+        capture_callbacks.onCaptureFailed = onCaptureFailed;
+        capture_callbacks.onCaptureSequenceCompleted = onCaptureSequenceCompleted;
+        capture_callbacks.onCaptureSequenceAborted = onCaptureSequenceAborted;
+        capture_callbacks.onCaptureBufferLost = 0;
 
-        ACameraCaptureSession_setRepeatingRequest(capture_session, &camera_capture_session_capture_callbacks, 1, &capture_request, nullptr);
+        ACameraCaptureSession_setRepeatingRequest(capture_session, &capture_callbacks, 1, &capture_request, nullptr);
     }
 
+    return 0;
+}
+
+std::string NdkCamera::listCameras(int facing)
+{
+    std::string out;
+    ACameraManager* mgr = ACameraManager_create();
+    std::vector<CameraInfo> cameras = enumerate_cameras(mgr);
+    int idx = 0;
+    char buf[128];
+    for (size_t i = 0; i < cameras.size(); i++)
+    {
+        if (cameras[i].facing == facing)
+        {
+            snprintf(buf, sizeof(buf), "%d|%d|%.1f\n", idx, cameras[i].facing, cameras[i].focal_length);
+            out += buf;
+            idx++;
+        }
+    }
+    ACameraManager_delete(mgr);
+    return out;
+}
+
+void NdkCamera::apply_request()
+{
+    if (capture_session && capture_request)
+        ACameraCaptureSession_setRepeatingRequest(capture_session, &capture_callbacks, 1, &capture_request, nullptr);
+}
+
+int NdkCamera::setAFMode(int mode)
+{
+    if (!capture_request) return -1;
+    uint8_t v = (uint8_t)mode;
+    ACaptureRequest_setEntry_u8(capture_request, ACAMERA_CONTROL_AF_MODE, 1, &v);
+    apply_request();
+    return 0;
+}
+
+int NdkCamera::setFocusDistance(float diopters)
+{
+    if (!capture_request) return -1;
+    ACaptureRequest_setEntry_float(capture_request, ACAMERA_LENS_FOCUS_DISTANCE, 1, &diopters);
+    apply_request();
+    return 0;
+}
+
+int NdkCamera::setAEMode(int mode)
+{
+    if (!capture_request) return -1;
+    uint8_t v = (uint8_t)mode;
+    ACaptureRequest_setEntry_u8(capture_request, ACAMERA_CONTROL_AE_MODE, 1, &v);
+    apply_request();
+    return 0;
+}
+
+int NdkCamera::setExposureTime(int64_t ns)
+{
+    if (!capture_request) return -1;
+    ACaptureRequest_setEntry_i64(capture_request, ACAMERA_SENSOR_EXPOSURE_TIME, 1, &ns);
+    apply_request();
+    return 0;
+}
+
+int NdkCamera::setSensitivity(int iso)
+{
+    if (!capture_request) return -1;
+    int32_t v = iso;
+    ACaptureRequest_setEntry_i32(capture_request, ACAMERA_SENSOR_SENSITIVITY, 1, &v);
+    apply_request();
+    return 0;
+}
+
+int NdkCamera::setAwbMode(int mode)
+{
+    if (!capture_request) return -1;
+    uint8_t v = (uint8_t)mode;
+    ACaptureRequest_setEntry_u8(capture_request, ACAMERA_CONTROL_AWB_MODE, 1, &v);
+    apply_request();
     return 0;
 }
 

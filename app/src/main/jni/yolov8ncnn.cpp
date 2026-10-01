@@ -22,6 +22,10 @@
 
 #include <string>
 #include <vector>
+#include <cstdint>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 
 #include <platform.h>
 #include <benchmark.h>
@@ -37,108 +41,161 @@
 #include <arm_neon.h>
 #endif // __ARM_NEON
 
-static int draw_unsupported(cv::Mat& rgb)
-{
-    const char text[] = "unsupported";
-
-    int baseLine = 0;
-    cv::Size label_size = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 1.0, 1, &baseLine);
-
-    int y = (rgb.rows - label_size.height) / 2;
-    int x = (rgb.cols - label_size.width) / 2;
-
-    cv::rectangle(rgb, cv::Rect(cv::Point(x, y), cv::Size(label_size.width, label_size.height + baseLine)),
-                    cv::Scalar(255, 255, 255), -1);
-
-    cv::putText(rgb, text, cv::Point(x, y + label_size.height),
-                cv::FONT_HERSHEY_SIMPLEX, 1.0, cv::Scalar(0, 0, 0));
-
-    return 0;
-}
-
-static int draw_fps(cv::Mat& rgb)
-{
-    // resolve moving average
-    float avg_fps = 0.f;
-    {
-        static double t0 = 0.f;
-        static float fps_history[10] = {0.f};
-
-        double t1 = ncnn::get_current_time();
-        if (t0 == 0.f)
-        {
-            t0 = t1;
-            return 0;
-        }
-
-        float fps = 1000.f / (t1 - t0);
-        t0 = t1;
-
-        for (int i = 9; i >= 1; i--)
-        {
-            fps_history[i] = fps_history[i - 1];
-        }
-        fps_history[0] = fps;
-
-        if (fps_history[9] == 0.f)
-        {
-            return 0;
-        }
-
-        for (int i = 0; i < 10; i++)
-        {
-            avg_fps += fps_history[i];
-        }
-        avg_fps /= 10.f;
-    }
-
-    char text[32];
-    sprintf(text, "FPS=%.2f", avg_fps);
-
-    int baseLine = 0;
-    cv::Size label_size = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseLine);
-
-    int y = 0;
-    int x = rgb.cols - label_size.width;
-
-    cv::rectangle(rgb, cv::Rect(cv::Point(x, y), cv::Size(label_size.width, label_size.height + baseLine)),
-                    cv::Scalar(255, 255, 255), -1);
-
-    cv::putText(rgb, text, cv::Point(x, y + label_size.height),
-                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0));
-
-    return 0;
-}
-
 static YOLOv8* g_yolov8 = 0;
 static ncnn::Mutex lock;
 
-class MyNdkCamera : public NdkCameraWindow
-{
-public:
-    virtual void on_image_render(cv::Mat& rgb) const;
-};
+// 最近一帧结果，供 Java 侧轮询读取
+static std::string g_result_string;
+static std::vector<uint8_t> g_result_frame;
 
-void MyNdkCamera::on_image_render(cv::Mat& rgb) const
+// 最近一帧 RGB 画面，供 WebUI 视频流使用
+static std::vector<uint8_t> g_frame_rgb;
+static int g_frame_w = 0;
+static int g_frame_h = 0;
+
+// ===== 标定参数（TODO：按一加9Pro实际相机与安装位标定）=====
+static const float CAM_HEIGHT_M = 1.2f;  // 相机离地高度(米)
+static const float CAM_FX_PX = 1000.f;   // 焦距(像素)
+
+static uint8_t coco_to_class(int label)
 {
-    // yolov8
+    switch (label)
     {
-        ncnn::MutexLockGuard g(lock);
+        case 0:  return 0x01; // person
+        case 1:  return 0x02; // bicycle
+        case 2:  return 0x03; // car
+        case 3:  return 0x04; // motorcycle
+        case 5:  return 0x05; // bus
+        case 7:  return 0x06; // truck
+        case 9:  return 0x07; // traffic light
+        case 11: return 0x08; // stop sign
+        default: return 0x00; // unknown
+    }
+}
 
-        if (g_yolov8)
-        {
-            std::vector<Object> objects;
-            g_yolov8->detect(rgb, objects);
+static uint8_t crc8(const uint8_t* data, size_t n)
+{
+    uint8_t crc = 0x00;
+    for (size_t i = 0; i < n; i++)
+    {
+        crc ^= data[i];
+        for (int j = 0; j < 8; j++)
+            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+    }
+    return crc;
+}
 
-            g_yolov8->draw(rgb, objects);
-        }
-        else
+static void process_frame(const cv::Mat& rgb)
+{
+    std::vector<Object> objects;
+    g_yolov8->detect(rgb, objects);
+
+    // 缓存 RGB 画面（供 WebUI 视频流）
+    {
+        size_t sz = rgb.total() * rgb.elemSize();
+        if (rgb.isContinuous() && sz > 0)
         {
-            draw_unsupported(rgb);
+            g_frame_rgb.resize(sz);
+            memcpy(g_frame_rgb.data(), rgb.data, sz);
+            g_frame_w = rgb.cols;
+            g_frame_h = rgb.rows;
         }
     }
 
-    draw_fps(rgb);
+    const int img_w = rgb.cols;
+    const int img_h = rgb.rows;
+    const float cx = img_w * 0.5f;
+    const float cy = img_h * 0.5f;
+
+    std::vector<uint8_t> frame;
+    // 帧头 10 字节
+    frame.push_back(0xAA);
+    frame.push_back(0x55);
+    frame.push_back(0x01); // version
+    frame.push_back(0x01); // type = 检测结果
+    static uint8_t seq = 0;
+    uint8_t s = seq++;
+    frame.push_back(s);
+    frame.push_back((uint8_t)objects.size());
+    uint32_t ts = (uint32_t)ncnn::get_current_time();
+    frame.push_back(ts & 0xFF);
+    frame.push_back((ts >> 8) & 0xFF);
+    frame.push_back((ts >> 16) & 0xFF);
+    frame.push_back((ts >> 24) & 0xFF);
+
+    char text[4096];
+    int off = snprintf(text, sizeof(text), "frame#%u n=%d\n", (unsigned)s, (int)objects.size());
+
+    for (size_t i = 0; i < objects.size(); i++)
+    {
+        const Object& o = objects[i];
+
+        uint8_t cls = coco_to_class(o.label);
+
+        // 底边法：纵向距离(米)
+        float y_bottom = o.rect.y + o.rect.height;
+        float dist_m = CAM_HEIGHT_M * CAM_FX_PX / (y_bottom - cy);
+        uint16_t distance_cm;
+        if (dist_m <= 0.f)        distance_cm = 0;
+        else if (dist_m >= 655.f) distance_cm = 0xFFFF;
+        else                      distance_cm = (uint16_t)(dist_m * 100.f);
+
+        // 水平方位角
+        float bx = o.rect.x + o.rect.width * 0.5f;
+        float bearing_deg = atanf((bx - cx) / CAM_FX_PX) * 180.f / 3.14159265f;
+        int16_t bearing_001 = (int16_t)(bearing_deg * 100.f);
+
+        // 朝向(宽高比启发式，粗略；TODO：换朝向分类器)
+        float aspect = o.rect.width / o.rect.height;
+        int16_t heading_001 = 0;
+        if (aspect > 1.8f)      heading_001 = 9000; // 侧面
+        else if (aspect > 1.4f) heading_001 = 4500; // 斜向
+
+        // 对象 8 字节
+        frame.push_back(0); // track_id 暂为 0
+        frame.push_back(cls);
+        frame.push_back(distance_cm & 0xFF);
+        frame.push_back((distance_cm >> 8) & 0xFF);
+        frame.push_back(bearing_001 & 0xFF);
+        frame.push_back((bearing_001 >> 8) & 0xFF);
+        frame.push_back(heading_001 & 0xFF);
+        frame.push_back((heading_001 >> 8) & 0xFF);
+
+        if (off < (int)sizeof(text) - 64)
+            off += snprintf(text + off, sizeof(text) - off,
+                            "  #%d cls=0x%02X d=%4.1fm b=%+5.1f h=%+d\n",
+                            (int)i, cls, dist_m, bearing_deg, heading_001 / 100);
+    }
+
+    // crc8
+    frame.push_back(crc8(frame.data(), frame.size()));
+
+    // logcat 打印 hex
+    {
+        char hex[2048];
+        int hoff = 0;
+        for (size_t i = 0; i < frame.size() && hoff < (int)sizeof(hex) - 4; i++)
+            hoff += snprintf(hex + hoff, sizeof(hex) - hoff, "%02X ", frame[i]);
+        __android_log_print(ANDROID_LOG_DEBUG, "ncnn", "frame[%uB] %s", (unsigned)frame.size(), hex);
+    }
+
+    // 存结果供 Java 轮询
+    g_result_string = text;
+    g_result_frame = frame;
+}
+
+class MyNdkCamera : public NdkCamera
+{
+public:
+    virtual void on_image(const cv::Mat& rgb) const;
+};
+
+void MyNdkCamera::on_image(const cv::Mat& rgb) const
+{
+    ncnn::MutexLockGuard g(lock);
+
+    if (g_yolov8)
+        process_frame(rgb);
 }
 
 static MyNdkCamera* g_camera = 0;
@@ -288,16 +345,105 @@ JNIEXPORT jboolean JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_closeCamera(JN
     return JNI_TRUE;
 }
 
-// public native boolean setOutputWindow(Surface surface);
-JNIEXPORT jboolean JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setOutputWindow(JNIEnv* env, jobject thiz, jobject surface)
+// public native String getResultString();
+JNIEXPORT jstring JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_getResultString(JNIEnv* env, jobject thiz)
 {
-    ANativeWindow* win = ANativeWindow_fromSurface(env, surface);
+    std::string s;
+    {
+        ncnn::MutexLockGuard g(lock);
+        s = g_result_string;
+    }
+    return env->NewStringUTF(s.c_str());
+}
 
-    __android_log_print(ANDROID_LOG_DEBUG, "ncnn", "setOutputWindow %p", win);
+// public native byte[] getFrame();
+JNIEXPORT jbyteArray JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_getFrame(JNIEnv* env, jobject thiz)
+{
+    std::vector<uint8_t> f;
+    {
+        ncnn::MutexLockGuard g(lock);
+        f = g_result_frame;
+    }
+    jbyteArray arr = env->NewByteArray((jsize)f.size());
+    if (f.size() > 0)
+        env->SetByteArrayRegion(arr, 0, (jsize)f.size(), (const jbyte*)f.data());
+    return arr;
+}
 
-    g_camera->set_window(win);
+// public native byte[] getFrameRGB();
+JNIEXPORT jbyteArray JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_getFrameRGB(JNIEnv* env, jobject thiz)
+{
+    std::vector<uint8_t> buf;
+    {
+        ncnn::MutexLockGuard g(lock);
+        buf = g_frame_rgb;
+    }
+    jbyteArray arr = env->NewByteArray((jsize)buf.size());
+    if (!buf.empty())
+        env->SetByteArrayRegion(arr, 0, (jsize)buf.size(), (const jbyte*)buf.data());
+    return arr;
+}
 
-    return JNI_TRUE;
+// public native int getFrameWidth();
+JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_getFrameWidth(JNIEnv* env, jobject thiz)
+{
+    return g_frame_w;
+}
+
+// public native int getFrameHeight();
+JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_getFrameHeight(JNIEnv* env, jobject thiz)
+{
+    return g_frame_h;
+}
+
+// public native int setAFMode(int mode);
+JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setAFMode(JNIEnv* env, jobject thiz, jint mode)
+{
+    return g_camera->setAFMode(mode);
+}
+
+// public native int setFocusDistance(float diopters);
+JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setFocusDistance(JNIEnv* env, jobject thiz, jfloat diopters)
+{
+    return g_camera->setFocusDistance(diopters);
+}
+
+// public native int setAEMode(int mode);
+JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setAEMode(JNIEnv* env, jobject thiz, jint mode)
+{
+    return g_camera->setAEMode(mode);
+}
+
+// public native int setExposureTime(long ns);
+JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setExposureTime(JNIEnv* env, jobject thiz, jlong ns)
+{
+    return g_camera->setExposureTime((int64_t)ns);
+}
+
+// public native int setSensitivity(int iso);
+JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setSensitivity(JNIEnv* env, jobject thiz, jint iso)
+{
+    return g_camera->setSensitivity(iso);
+}
+
+// public native int setAwbMode(int mode);
+JNIEXPORT jint JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_setAwbMode(JNIEnv* env, jobject thiz, jint mode)
+{
+    return g_camera->setAwbMode(mode);
+}
+
+// public native String listCameras(int facing);
+JNIEXPORT jstring JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_listCameras(JNIEnv* env, jobject thiz, jint facing)
+{
+    return env->NewStringUTF(g_camera->listCameras(facing).c_str());
+}
+
+// public native boolean openCameraIndex(int facing, int index);
+JNIEXPORT jboolean JNICALL Java_com_tencent_yolov8ncnn_YOLOv8Ncnn_openCameraIndex(JNIEnv* env, jobject thiz, jint facing, jint index)
+{
+    g_camera->close();
+    int r = g_camera->open(facing, index);
+    return r == 0 ? JNI_TRUE : JNI_FALSE;
 }
 
 }

@@ -1,38 +1,28 @@
-// Tencent is pleased to support the open source community by making ncnn available.
-//
-// Copyright (C) 2021 THL A29 Limited, a Tencent company. All rights reserved.
-//
-// Licensed under the BSD 3-Clause License (the "License"); you may not use this file except
-// in compliance with the License. You may obtain a copy of the License at
-//
-// https://opensource.org/licenses/BSD-3-Clause
-//
-// Unless required by applicable law or agreed to in writing, software distributed
-// under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
-// CONDITIONS OF ANY KIND, either express or implied. See the License for the
-// specific language governing permissions and limitations under the License.
-
 package com.tencent.yolov8ncnn;
 
 import android.Manifest;
 import android.app.Activity;
 import android.content.pm.PackageManager;
-import android.graphics.PixelFormat;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
-import android.view.Surface;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.Button;
 import android.widget.Spinner;
+import android.widget.TextView;
 
 import android.support.v4.app.ActivityCompat;
 import android.support.v4.content.ContextCompat;
 
-public class MainActivity extends Activity implements SurfaceHolder.Callback
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.NetworkInterface;
+import java.util.Enumeration;
+
+public class MainActivity extends Activity
 {
     public static final int REQUEST_CAMERA = 100;
 
@@ -46,9 +36,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback
     private int current_model = 0;
     private int current_cpugpu = 0;
 
-    private SurfaceView cameraView;
+    private TextView resultView;
+    private TextView urlView;
+    private WebServer webServer;
 
-    /** Called when the activity is first created. */
+    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Runnable pollTask = new Runnable() {
+        @Override
+        public void run() {
+            String s = yolov8ncnn.getResultString();
+            if (s != null && !s.isEmpty()) {
+                resultView.setText(s);
+            }
+            handler.postDelayed(this, 200);
+        }
+    };
+
     @Override
     public void onCreate(Bundle savedInstanceState)
     {
@@ -57,22 +60,16 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback
 
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        cameraView = (SurfaceView) findViewById(R.id.cameraview);
-
-        cameraView.getHolder().setFormat(PixelFormat.RGBA_8888);
-        cameraView.getHolder().addCallback(this);
+        resultView = (TextView) findViewById(R.id.resultview);
+        urlView = (TextView) findViewById(R.id.urlview);
 
         Button buttonSwitchCamera = (Button) findViewById(R.id.buttonSwitchCamera);
         buttonSwitchCamera.setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View arg0) {
-
                 int new_facing = 1 - facing;
-
                 yolov8ncnn.closeCamera();
-
                 yolov8ncnn.openCamera(new_facing);
-
                 facing = new_facing;
             }
         });
@@ -132,6 +129,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback
         });
 
         reload();
+
+        // 启动 WebUI 服务器
+        webServer = new WebServer(yolov8ncnn, getAssets());
+        webServer.start();
+
+        String ip = getLocalIpAddress();
+        urlView.setText("WebUI: http://" + (ip != null ? ip : "127.0.0.1") + ":8080");
     }
 
     private void reload()
@@ -141,22 +145,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback
         {
             Log.e("MainActivity", "yolov8ncnn loadModel failed");
         }
-    }
-
-    @Override
-    public void surfaceChanged(SurfaceHolder holder, int format, int width, int height)
-    {
-        yolov8ncnn.setOutputWindow(holder.getSurface());
-    }
-
-    @Override
-    public void surfaceCreated(SurfaceHolder holder)
-    {
-    }
-
-    @Override
-    public void surfaceDestroyed(SurfaceHolder holder)
-    {
     }
 
     @Override
@@ -170,6 +158,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback
         }
 
         yolov8ncnn.openCamera(facing);
+        handler.post(pollTask);
     }
 
     @Override
@@ -177,6 +166,41 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback
     {
         super.onPause();
 
+        handler.removeCallbacks(pollTask);
         yolov8ncnn.closeCamera();
+    }
+
+    @Override
+    public void onDestroy()
+    {
+        super.onDestroy();
+
+        if (webServer != null)
+        {
+            webServer.shutdown();
+        }
+    }
+
+    private String getLocalIpAddress()
+    {
+        try {
+            Enumeration<NetworkInterface> ifs = NetworkInterface.getNetworkInterfaces();
+            while (ifs.hasMoreElements())
+            {
+                NetworkInterface nif = ifs.nextElement();
+                Enumeration<InetAddress> addrs = nif.getInetAddresses();
+                while (addrs.hasMoreElements())
+                {
+                    InetAddress a = addrs.nextElement();
+                    if (!a.isLoopbackAddress() && a instanceof Inet4Address)
+                    {
+                        return a.getHostAddress();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.e("MainActivity", "getLocalIpAddress", e);
+        }
+        return null;
     }
 }

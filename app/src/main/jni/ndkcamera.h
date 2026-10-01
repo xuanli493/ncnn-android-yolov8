@@ -23,7 +23,19 @@
 #include <camera/NdkCameraMetadata.h>
 #include <media/NdkImageReader.h>
 
+#include <string>
+#include <vector>
+#include <cstdint>
+
 #include <opencv2/core/core.hpp>
+
+struct CameraInfo
+{
+    std::string id;
+    int facing;          // 0=front 1=back
+    int orientation;
+    float focal_length;  // mm
+};
 
 class NdkCamera
 {
@@ -39,11 +51,24 @@ public:
 
     virtual void on_image(const unsigned char* nv21, int nv21_width, int nv21_height) const;
 
+    // 相机控制（WebUI 用）
+    int setAFMode(int mode);
+    int setFocusDistance(float diopters);
+    int setAEMode(int mode);
+    int setExposureTime(int64_t ns);
+    int setSensitivity(int iso);
+    int setAwbMode(int mode);
+
+    // 相机枚举与按索引打开
+    std::string listCameras(int facing);
+    int open(int facing, int index);
+
 public:
     int camera_facing;
     int camera_orientation;
 
 private:
+    void apply_request();
     ACameraManager* camera_manager;
     ACameraDevice* camera_device;
     AImageReader* image_reader;
@@ -53,6 +78,7 @@ private:
     ACaptureSessionOutputContainer* capture_session_output_container;
     ACaptureSessionOutput* capture_session_output;
     ACameraCaptureSession* capture_session;
+    ACameraCaptureSession_captureCallbacks capture_callbacks;
 };
 
 class NdkCameraWindow : public NdkCamera

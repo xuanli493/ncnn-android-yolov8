@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>YOLO Camera Lab</title>
+<style>
+:root{
+  --bg:#0b0f14;
+  --panel:#121a24;
+  --panel2:#0e141c;
+  --border:#223040;
+  --text:#dbe4ee;
+  --muted:#7d8b9c;
+  --accent:#3ddc84;
+  --accent2:#5b8cff;
+  --radius:14px;
+}
+*{box-sizing:border-box}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg);
+  color:var(--text);
+  font:14px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+  min-height:100vh;
+}
+
+header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 22px;border-bottom:1px solid var(--border);
+  position:sticky;top:0;z-index:10;
+  background:rgba(11,15,20,.86);backdrop-filter:blur(10px);
+}
+.brand{display:flex;align-items:center;gap:10px}
+.brand h1{font-size:16px;margin:0;font-weight:600;letter-spacing:.2px}
+.brand .sub{font-size:12px;color:var(--muted);margin-left:4px}
+.live{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--accent);font-weight:500}
+.live .dot{width:8px;height:8px;border-radius:50%;background:var(--accent);animation:pulse 2s infinite}
+@keyframes pulse{
+  0%{box-shadow:0 0 0 0 rgba(61,220,132,.5)}
+  70%{box-shadow:0 0 0 7px rgba(61,220,132,0)}
+  100%{box-shadow:0 0 0 0 rgba(61,220,132,0)}
+}
+
+main{
+  display:grid;grid-template-columns:1fr 360px;gap:16px;
+  padding:16px;max-width:1240px;margin:0 auto;align-items:start;
+}
+@media(max-width:920px){main{grid-template-columns:1fr}}
+
+.video{position:sticky;top:72px}
+.video .frame{
+  border-radius:var(--radius);overflow:hidden;border:1px solid var(--border);
+  background:#000;line-height:0;
+}
+.video img{width:100%;display:block;aspect-ratio:4/3;object-fit:cover}
+.video .hint{margin-top:8px;font-size:12px;color:var(--muted);text-align:center}
+
+.controls{display:flex;flex-direction:column;gap:12px}
+.reset{
+  width:100%;padding:13px;background:var(--accent);color:#05230f;border:none;
+  border-radius:var(--radius);font-size:14px;font-weight:600;cursor:pointer;letter-spacing:1px;
+  font-family:inherit;
+}
+.reset:hover{filter:brightness(1.07)}
+.reset:active{transform:scale(.99)}
+
+.card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px}
+.card h2{
+  font-size:11px;text-transform:uppercase;letter-spacing:1.4px;color:var(--muted);
+  margin:0 0 14px;font-weight:600;display:flex;align-items:center;gap:8px;
+}
+.card h2::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--accent2)}
+
+.field{margin-bottom:14px}
+.field:last-child{margin-bottom:0}
+.field .lab{display:flex;justify-content:space-between;align-items:center;margin-bottom:7px}
+.field .lab span{font-size:13px;color:var(--text)}
+.field .lab .val{
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;color:var(--accent2);
+  background:var(--panel2);padding:2px 9px;border-radius:7px;border:1px solid var(--border);
+}
+
+select{
+  width:100%;padding:9px 34px 9px 11px;background:var(--panel2);color:var(--text);
+  border:1px solid var(--border);border-radius:9px;font-size:13px;outline:none;
+  appearance:none;-webkit-appearance:none;cursor:pointer;
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%237d8b9c' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 10px center;background-size:15px;
+}
+select:focus{border-color:var(--accent2)}
+select option{background:var(--panel2);color:var(--text)}
+
+input[type=range]{
+  -webkit-appearance:none;appearance:none;width:100%;height:5px;border-radius:5px;
+  background:var(--panel2);border:1px solid var(--border);outline:none;cursor:pointer;
+}
+input[type=range]::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;width:17px;height:17px;border-radius:50%;
+  background:var(--accent);border:none;cursor:pointer;box-shadow:0 1px 5px rgba(0,0,0,.5);
+}
+input[type=range]::-moz-range-thumb{
+  width:17px;height:17px;border-radius:50%;background:var(--accent);border:none;cursor:pointer;
+}
+input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.12)}
+
+footer{
+  max-width:1240px;margin:0 auto;padding:0 16px 24px;font-size:12px;color:var(--muted);
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <h1>Camera Lab</h1>
+    <span class="sub">YOLO · 车载视觉调试</span>
+  </div>
+  <span class="live"><span class="dot"></span>LIVE</span>
+</header>
+
+<main>
+  <section class="video">
+    <div class="frame"><img id="stream" src="/stream" alt="camera stream"></div>
+    <div class="hint">MJPEG 实时流 · 拖动右侧滑块即时生效</div>
+  </section>
+
+  <aside class="controls">
+    <button id="reset" class="reset">⟲ 重置参数</button>
+
+    <div class="card">
+      <h2>摄像头</h2>
+      <div class="field">
+        <div class="lab"><span>前后</span></div>
+        <select id="facing">
+          <option value="1">后置</option>
+          <option value="0">前置</option>
+        </select>
+      </div>
+      <div class="field">
+        <div class="lab"><span>镜头</span></div>
+        <select id="cam"><option>加载中…</option></select>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>对焦</h2>
+      <div class="field">
+        <div class="lab"><span>AF 模式</span></div>
+        <select id="af">
+          <option value="3">连续视频</option>
+          <option value="0">OFF · 手动</option>
+          <option value="1">AUTO</option>
+          <option value="2">MACRO</option>
+          <option value="4">连续拍照</option>
+          <option value="5">EDOF</option>
+        </select>
+      </div>
+      <div class="field">
+        <div class="lab"><span>对焦距离</span><span class="val" id="focusVal">0 (∞)</span></div>
+        <input type="range" id="focus" min="0" max="10" step="0.1" value="0">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>曝光</h2>
+      <div class="field">
+        <div class="lab"><span>AE 模式</span></div>
+        <select id="ae">
+          <option value="1">ON · 自动</option>
+          <option value="0">OFF · 手动</option>
+        </select>
+      </div>
+      <div class="field">
+        <div class="lab"><span>曝光时间</span><span class="val" id="exposureVal">1/60 s</span></div>
+        <input type="range" id="exposure" min="1000000" max="66666666" step="1000000" value="16666666">
+      </div>
+      <div class="field">
+        <div class="lab"><span>ISO</span><span class="val" id="isoVal">100</span></div>
+        <input type="range" id="iso" min="100" max="3200" step="50" value="100">
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>白平衡</h2>
+      <div class="field">
+        <div class="lab"><span>AWB 模式</span></div>
+        <select id="awb">
+          <option value="1">AUTO</option>
+          <option value="0">OFF</option>
+          <option value="2">白炽灯</option>
+          <option value="3">荧光灯</option>
+          <option value="5">日光</option>
+          <option value="6">阴天</option>
+          <option value="8">阴影</option>
+        </select>
+      </div>
+    </div>
+  </aside>
+</main>
+
+<footer>相机参数通过 Camera2 (NDK) 实时下发 · 部分参数是否生效取决于设备与镜头</footer>
+
+<script>
+function api(path){ fetch(path).catch(function(){}); }
+
+var REAR_NAMES = ['主摄', '超广角', '长焦', '黑白'];
+function cameraName(facing, index){
+  if (String(facing) === '0') return '前置';
+  var i = parseInt(index);
+  return REAR_NAMES[i] || ('镜头' + i);
+}
+
+function loadCameras(){
+  var f = document.getElementById('facing').value;
+  fetch('/api/cameras?facing=' + f)
+    .then(function(r){ return r.text(); })
+    .then(function(t){
+      var sel = document.getElementById('cam');
+      sel.innerHTML = '';
+      var lines = t.trim().split('\n').filter(function(l){ return l; });
+      lines.forEach(function(line){
+        var p = line.split('|');   // index|facing|focal_mm
+        var o = document.createElement('option');
+        o.value = p[0];
+        o.textContent = cameraName(f, p[0]) + '  (' + p[2] + ' mm)';
+        sel.appendChild(o);
+      });
+      if (lines.length === 0){
+        var o = document.createElement('option');
+        o.textContent = '无可用镜头';
+        sel.appendChild(o);
+      }
+    })
+    .catch(function(){});
+}
+
+document.getElementById('facing').onchange = loadCameras;
+
+document.getElementById('cam').onchange = function(){
+  api('/api/camera?facing=' + document.getElementById('facing').value + '&index=' + this.value);
+};
+
+document.getElementById('af').onchange = function(){ api('/api/af?mode=' + this.value); };
+
+document.getElementById('focus').oninput = function(){
+  var v = parseFloat(this.value);
+  document.getElementById('focusVal').textContent = (v === 0) ? '0 (∞)' : v.toFixed(1) + ' D';
+  api('/api/focus?d=' + v);
+};
+
+document.getElementById('ae').onchange = function(){ api('/api/ae?mode=' + this.value); };
+
+document.getElementById('exposure').oninput = function(){
+  var ns = parseInt(this.value);
+  document.getElementById('exposureVal').textContent = '1/' + Math.round(1e9 / ns) + ' s';
+  api('/api/exposure?ns=' + ns);
+};
+
+document.getElementById('iso').oninput = function(){
+  document.getElementById('isoVal').textContent = this.value;
+  api('/api/iso?value=' + this.value);
+};
+
+document.getElementById('awb').onchange = function(){ api('/api/awb?mode=' + this.value); };
+
+document.getElementById('reset').onclick = function(){
+  document.getElementById('af').value = '3';
+  document.getElementById('focus').value = '0';
+  document.getElementById('focusVal').textContent = '0 (∞)';
+  document.getElementById('ae').value = '1';
+  document.getElementById('exposure').value = '16666666';
+  document.getElementById('exposureVal').textContent = '1/60 s';
+  document.getElementById('iso').value = '100';
+  document.getElementById('isoVal').textContent = '100';
+  document.getElementById('awb').value = '1';
+  api('/api/reset');
+};
+
+loadCameras();
+</script>
+</body>
+</html>
